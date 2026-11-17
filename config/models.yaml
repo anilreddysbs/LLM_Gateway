@@ -1,0 +1,92 @@
+# LLM Gateway Models & Pricing Configuration
+# NOTE: Check current model IDs and prices in each provider's official documentation before production use.
+# Prices are listed as USD per 1,000,000 tokens (input_cost_per_million, output_cost_per_million).
+
+models:
+  # Gemini Models (Google Generative Language API)
+  gemini-1.5-flash:
+    provider: gemini
+    model_id: gemini-1.5-flash
+    input_cost_per_million: "0.075"
+    output_cost_per_million: "0.30"
+    max_tokens: 8192
+    supports_streaming: true
+
+  gemini-1.5-pro:
+    provider: gemini
+    model_id: gemini-1.5-pro
+    input_cost_per_million: "1.25"
+    output_cost_per_million: "5.00"
+    max_tokens: 8192
+    supports_streaming: true
+
+  # OpenAI Models (OpenAI or compatible provider)
+  gpt-4o-mini:
+    provider: openai
+    model_id: gpt-4o-mini
+    input_cost_per_million: "0.15"
+    output_cost_per_million: "0.60"
+    max_tokens: 16384
+    supports_streaming: true
+
+  gpt-4o:
+    provider: openai
+    model_id: gpt-4o
+    input_cost_per_million: "2.50"
+    output_cost_per_million: "10.00"
+    max_tokens: 16384
+    supports_streaming: true
+
+  # Mock Models for Demos and Testing
+  mock-primary:
+    provider: mock
+    model_id: mock-primary
+    input_cost_per_million: "0.10"
+    output_cost_per_million: "0.20"
+    max_tokens: 4096
+    supports_streaming: true
+
+  mock-secondary:
+    provider: mock
+    model_id: mock-secondary
+    input_cost_per_million: "0.15"
+    output_cost_per_million: "0.30"
+    max_tokens: 4096
+    supports_streaming: true
+
+  mock-fallback:
+    provider: mock
+    model_id: mock-fallback
+    input_cost_per_million: "0.05"
+    output_cost_per_million: "0.10"
+    max_tokens: 4096
+    supports_streaming: true
+
+# Routing Aliases mapping to ordered provider+model targets
+aliases:
+  default:
+    - provider: gemini
+      model: gemini-1.5-flash
+    - provider: openai
+      model: gpt-4o-mini
+
+  fast:
+    - provider: gemini
+      model: gemini-1.5-flash
+    - provider: openai
+      model: gpt-4o-mini
+
+  quality:
+    - provider: gemini
+      model: gemini-1.5-pro
+    - provider: openai
+      model: gpt-4o
+
+  mock-chain:
+    - provider: mock
+      model: mock-primary
+    - provider: mock
+      model: mock-secondary
+    - provider: mock
+      model: mock-fallback
+
