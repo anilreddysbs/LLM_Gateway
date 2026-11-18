@@ -1,4 +1,4 @@
-"""OpenAI-compatible Chat Completions API endpoint with caching and rate limiting."""
+"""OpenAI-compatible Chat Completions API endpoint with caching, rate limiting, and fallback."""
 
 import time
 import uuid
@@ -21,11 +21,12 @@ from llm_gateway.core.cache import (
     parse_cache_control,
 )
 from llm_gateway.core.rate_limit import SlidingWindowRateLimiter, check_monthly_budget
+from llm_gateway.core.resilience.fallback import FallbackExecutor, FallbackResult
 from llm_gateway.core.routing import RequestRouter, get_router
 from llm_gateway.db.models import ApiKey
 from llm_gateway.db.session import get_db_session
 from llm_gateway.observability.logging import request_id_ctx
-from llm_gateway.providers.base import ProviderError, ProviderRequest, ProviderResponse
+from llm_gateway.providers.base import ProviderError, ProviderResponse
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
 from llm_gateway.schemas.chat import (
     ChatChoice,
@@ -78,7 +79,7 @@ async def chat_completions(
     cache_control: str | None = Header(None, alias="Cache-Control"),
 ) -> ChatCompletionResponse:
     """Handle OpenAI-style chat completions requests."""
-    # 1. Budget enforcement
+    # 1. Monthly budget check
     await check_monthly_budget(api_key, redis_client, session)
 
     # 2. Sliding window rate limiting
@@ -115,7 +116,7 @@ async def chat_completions(
             param="max_tokens",
         )
 
-    # 4. Resolve routing alias or model
+    # 4. Resolve routing alias or model into target chain
     try:
         targets = router_engine.resolve(request.model)
     except ValueError as exc:
@@ -126,20 +127,19 @@ async def chat_completions(
             param="model",
         ) from exc
 
-    primary_target = targets[0]
-    provider = factory.get_provider(primary_target.provider)
-
-    provider_req = ProviderRequest(
-        model=primary_target.model,
-        messages=request.messages,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens,
-        timeout_seconds=settings.PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
+    executor = FallbackExecutor(
+        redis_client=redis_client,
+        factory=factory,
+        settings=settings,
     )
 
-    async def compute_provider_response() -> ProviderResponse:
+    fallback_metadata = {"fallback_used": False}
+
+    async def compute_resilient_completion() -> ProviderResponse:
         try:
-            return await provider.complete(provider_req)
+            fb_res: FallbackResult = await executor.execute(request, targets)
+            fallback_metadata["fallback_used"] = fb_res.fallback_used
+            return fb_res.response
         except ProviderError as err:
             raise GatewayException(
                 status_code=err.status_code,
@@ -166,21 +166,21 @@ async def chat_completions(
         )
         provider_resp, is_cache_hit = await response_cache.get_or_compute(
             cache_key=cache_key,
-            compute_fn=compute_provider_response,
+            compute_fn=compute_resilient_completion,
             no_cache=no_cache,
             no_store=no_store,
             ttl_seconds=settings.CACHE_TTL_SECONDS,
         )
         cache_status = "HIT" if is_cache_hit else "MISS"
     else:
-        provider_resp = await compute_provider_response()
+        provider_resp = await compute_resilient_completion()
         cache_status = "MISS"
 
     _set_gateway_headers(
         response=response,
         provider_name=provider_resp.raw_provider_id,
         cache_status=cache_status,
-        fallback_used=False,
+        fallback_used=fallback_metadata["fallback_used"],
         limit=rate_info.limit,
         remaining=rate_info.remaining,
         reset_seconds=rate_info.reset_seconds,
