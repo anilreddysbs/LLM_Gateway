@@ -1,0 +1,140 @@
+"""OpenAI-compatible Chat Completions API endpoint."""
+
+import time
+import uuid
+
+from fastapi import APIRouter, Depends, Header, Response, status
+
+from llm_gateway.config.settings import Settings, get_settings
+from llm_gateway.core.routing import RequestRouter, get_router
+from llm_gateway.observability.logging import request_id_ctx
+from llm_gateway.providers.base import ProviderError, ProviderRequest
+from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
+from llm_gateway.schemas.chat import (
+    ChatChoice,
+    ChatChoiceMessage,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    UsageInfo,
+)
+from llm_gateway.schemas.errors import GatewayException
+
+router = APIRouter(prefix="/v1", tags=["Chat"])
+
+
+def _set_gateway_headers(
+    response: Response,
+    provider_name: str,
+    cache_status: str = "MISS",
+    fallback_used: bool = False,
+    limit: int = 60,
+    remaining: int = 59,
+    reset_seconds: int = 60,
+) -> None:
+    """Attach standard gateway telemetry and rate limit headers."""
+    req_id = request_id_ctx.get()
+    response.headers["X-Request-ID"] = req_id
+    response.headers["X-Gateway-Provider"] = provider_name
+    response.headers["X-Gateway-Cache"] = cache_status
+    response.headers["X-Gateway-Fallback"] = "true" if fallback_used else "false"
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    response.headers["X-RateLimit-Reset"] = str(reset_seconds)
+
+
+@router.post(
+    "/chat/completions",
+    response_model=ChatCompletionResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def chat_completions(
+    request: ChatCompletionRequest,
+    response: Response,
+    router_engine: RequestRouter = Depends(get_router),
+    factory: ProviderFactory = Depends(get_provider_factory),
+    settings: Settings = Depends(get_settings),
+    cache_control: str | None = Header(None, alias="Cache-Control"),
+) -> ChatCompletionResponse:
+    """Handle OpenAI-style chat completions requests."""
+    # 1. Input validation limits
+    if len(request.messages) > settings.MAX_REQUEST_MESSAGES:
+        raise GatewayException(
+            status_code=400,
+            message=f"Request contains {len(request.messages)} messages, exceeding maximum of {settings.MAX_REQUEST_MESSAGES}",
+            error_type="invalid_request_error",
+            param="messages",
+        )
+
+    if request.max_tokens and request.max_tokens > settings.MAX_REQUEST_TOKENS_CEILING:
+        raise GatewayException(
+            status_code=400,
+            message=f"max_tokens ({request.max_tokens}) exceeds maximum allowable ceiling of {settings.MAX_REQUEST_TOKENS_CEILING}",
+            error_type="invalid_request_error",
+            param="max_tokens",
+        )
+
+    # 2. Resolve routing alias or model
+    try:
+        targets = router_engine.resolve(request.model)
+    except ValueError as exc:
+        raise GatewayException(
+            status_code=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            param="model",
+        ) from exc
+
+    # In Phase 2: Select primary target; resilience/fallback engine will handle chaining in Phase 6
+    primary_target = targets[0]
+    provider = factory.get_provider(primary_target.provider)
+
+    provider_req = ProviderRequest(
+        model=primary_target.model,
+        messages=request.messages,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        timeout_seconds=settings.PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
+    )
+
+    try:
+        provider_resp = await provider.complete(provider_req)
+    except ProviderError as err:
+        raise GatewayException(
+            status_code=err.status_code,
+            message=err.message,
+            error_type="upstream_error" if err.status_code >= 500 else "invalid_request_error",
+        ) from err
+    except Exception as exc:
+        raise GatewayException(
+            status_code=500,
+            message=f"Internal error processing completion: {exc}",
+            error_type="api_error",
+        ) from exc
+
+    _set_gateway_headers(
+        response=response,
+        provider_name=provider_resp.raw_provider_id,
+        cache_status="MISS",
+        fallback_used=False,
+    )
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created_ts = int(time.time())
+
+    return ChatCompletionResponse(
+        id=completion_id,
+        created=created_ts,
+        model=request.model,
+        choices=[
+            ChatChoice(
+                index=0,
+                message=ChatChoiceMessage(role="assistant", content=provider_resp.text),
+                finish_reason=provider_resp.finish_reason,
+            )
+        ],
+        usage=UsageInfo(
+            prompt_tokens=provider_resp.input_tokens,
+            completion_tokens=provider_resp.output_tokens,
+            total_tokens=provider_resp.input_tokens + provider_resp.output_tokens,
+        ),
+    )

@@ -5,13 +5,16 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from llm_gateway.api.ops.health import router as health_router
+from llm_gateway.api.router import api_router
 from llm_gateway.config.settings import get_settings
 from llm_gateway.db.session import close_db, init_db
 from llm_gateway.observability.logging import logger, request_id_ctx, setup_logging
+from llm_gateway.schemas.errors import GatewayException
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -84,8 +87,34 @@ def create_app() -> FastAPI:
     # Request ID and tracing middleware
     app.add_middleware(RequestContextMiddleware)
 
-    # Mount operations routes
-    app.include_router(health_router)
+    # Standard OpenAI error handlers
+    @app.exception_handler(GatewayException)
+    async def gateway_exception_handler(_: Request, exc: GatewayException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.detail,
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(_: Request, exc: RequestValidationError):
+        errors = exc.errors()
+        first_err = errors[0] if errors else {}
+        param = str(first_err.get("loc", [""])[-1]) if first_err.get("loc") else None
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "message": first_err.get("msg", "Validation error"),
+                    "type": "invalid_request_error",
+                    "code": "validation_error",
+                    "param": param,
+                }
+            },
+        )
+
+    # Mount master API router
+    app.include_router(api_router)
 
     return app
 
