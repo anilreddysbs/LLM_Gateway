@@ -1,4 +1,4 @@
-"""OpenAI-compatible Chat Completions API endpoint."""
+"""OpenAI-compatible Chat Completions API endpoint with caching and rate limiting."""
 
 import time
 import uuid
@@ -7,14 +7,25 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_gateway.api.dependencies import get_rate_limiter, get_redis, verify_client_api_key
+from llm_gateway.api.dependencies import (
+    get_rate_limiter,
+    get_redis,
+    get_response_cache,
+    verify_client_api_key,
+)
 from llm_gateway.config.settings import Settings, get_settings
+from llm_gateway.core.cache import (
+    ResponseCache,
+    is_cache_eligible,
+    normalize_request_for_cache,
+    parse_cache_control,
+)
 from llm_gateway.core.rate_limit import SlidingWindowRateLimiter, check_monthly_budget
 from llm_gateway.core.routing import RequestRouter, get_router
 from llm_gateway.db.models import ApiKey
 from llm_gateway.db.session import get_db_session
 from llm_gateway.observability.logging import request_id_ctx
-from llm_gateway.providers.base import ProviderError, ProviderRequest
+from llm_gateway.providers.base import ProviderError, ProviderRequest, ProviderResponse
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
 from llm_gateway.schemas.chat import (
     ChatChoice,
@@ -58,6 +69,7 @@ async def chat_completions(
     response: Response,
     api_key: ApiKey = Depends(verify_client_api_key),
     rate_limiter: SlidingWindowRateLimiter = Depends(get_rate_limiter),
+    response_cache: ResponseCache = Depends(get_response_cache),
     redis_client: Redis = Depends(get_redis),
     session: AsyncSession = Depends(get_db_session),
     router_engine: RequestRouter = Depends(get_router),
@@ -85,7 +97,8 @@ async def chat_completions(
             code="rate_limit_exceeded",
             headers=headers,
         )
-    # 1. Input validation limits
+
+    # 3. Input validation limits
     if len(request.messages) > settings.MAX_REQUEST_MESSAGES:
         raise GatewayException(
             status_code=400,
@@ -102,7 +115,7 @@ async def chat_completions(
             param="max_tokens",
         )
 
-    # 2. Resolve routing alias or model
+    # 4. Resolve routing alias or model
     try:
         targets = router_engine.resolve(request.model)
     except ValueError as exc:
@@ -113,7 +126,6 @@ async def chat_completions(
             param="model",
         ) from exc
 
-    # In Phase 2: Select primary target; resilience/fallback engine will handle chaining in Phase 6
     primary_target = targets[0]
     provider = factory.get_provider(primary_target.provider)
 
@@ -125,25 +137,49 @@ async def chat_completions(
         timeout_seconds=settings.PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     )
 
-    try:
-        provider_resp = await provider.complete(provider_req)
-    except ProviderError as err:
-        raise GatewayException(
-            status_code=err.status_code,
-            message=err.message,
-            error_type="upstream_error" if err.status_code >= 500 else "invalid_request_error",
-        ) from err
-    except Exception as exc:
-        raise GatewayException(
-            status_code=500,
-            message=f"Internal error processing completion: {exc}",
-            error_type="api_error",
-        ) from exc
+    async def compute_provider_response() -> ProviderResponse:
+        try:
+            return await provider.complete(provider_req)
+        except ProviderError as err:
+            raise GatewayException(
+                status_code=err.status_code,
+                message=err.message,
+                error_type="upstream_error" if err.status_code >= 500 else "invalid_request_error",
+            ) from err
+        except Exception as exc:
+            raise GatewayException(
+                status_code=500,
+                message=f"Internal error processing completion: {exc}",
+                error_type="api_error",
+            ) from exc
+
+    # 5. Check cache eligibility & execute
+    no_cache, no_store = parse_cache_control(cache_control)
+    cache_eligible = is_cache_eligible(request, settings)
+
+    if cache_eligible:
+        isolate = api_key.isolate_cache or settings.CACHE_ISOLATION_DEFAULT
+        cache_key = normalize_request_for_cache(
+            request,
+            api_key=api_key,
+            isolate_cache=isolate,
+        )
+        provider_resp, is_cache_hit = await response_cache.get_or_compute(
+            cache_key=cache_key,
+            compute_fn=compute_provider_response,
+            no_cache=no_cache,
+            no_store=no_store,
+            ttl_seconds=settings.CACHE_TTL_SECONDS,
+        )
+        cache_status = "HIT" if is_cache_hit else "MISS"
+    else:
+        provider_resp = await compute_provider_response()
+        cache_status = "MISS"
 
     _set_gateway_headers(
         response=response,
         provider_name=provider_resp.raw_provider_id,
-        cache_status="MISS",
+        cache_status=cache_status,
         fallback_used=False,
         limit=rate_info.limit,
         remaining=rate_info.remaining,

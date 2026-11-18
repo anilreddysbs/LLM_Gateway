@@ -14,6 +14,7 @@ from llm_gateway.core.auth import (
     hash_api_key,
     set_cached_key_info,
 )
+from llm_gateway.core.cache import ResponseCache
 from llm_gateway.core.rate_limit import SlidingWindowRateLimiter
 from llm_gateway.db.models import ApiKey
 from llm_gateway.db.repositories.api_key_repo import ApiKeyRepository
@@ -45,6 +46,11 @@ async def get_api_key_repo(session: AsyncSession = Depends(get_db_session)) -> A
 async def get_rate_limiter(redis_client: Redis = Depends(get_redis)) -> SlidingWindowRateLimiter:
     """Dependency yielding SlidingWindowRateLimiter."""
     return SlidingWindowRateLimiter(redis_client)
+
+
+async def get_response_cache(redis_client: Redis = Depends(get_redis)) -> ResponseCache:
+    """Dependency yielding ResponseCache."""
+    return ResponseCache(redis_client)
 
 
 async def verify_admin_key(
