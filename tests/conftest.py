@@ -16,9 +16,12 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["REDIS_URL"] = "redis://localhost:6379/0"
 os.environ["ADMIN_API_KEY"] = "test-admin-key"
 
+from llm_gateway.api.dependencies import get_redis
 from llm_gateway.config.models_config import ModelsConfig, load_models_config
 from llm_gateway.config.settings import Settings, get_settings
-from llm_gateway.db.models import Base
+from llm_gateway.core.auth import generate_api_key
+from llm_gateway.db.models import ApiKey, Base
+from llm_gateway.db.repositories.api_key_repo import ApiKeyRepository
 from llm_gateway.db.session import get_db_session
 from llm_gateway.main import create_app
 
@@ -66,14 +69,34 @@ async def fake_redis() -> AsyncGenerator[Redis, None]:
 
 
 @pytest_asyncio.fixture
-async def client(test_db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    """Async HTTP client bound to the FastAPI application with test DB override."""
+async def valid_api_key(test_db_session: AsyncSession) -> tuple[ApiKey, str]:
+    """Create and return a valid test API key and its plaintext string."""
+    raw_key, key_hash, key_prefix = generate_api_key()
+    repo = ApiKeyRepository(test_db_session)
+    db_key = await repo.create(
+        name="Integration Test Key",
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        requests_per_minute=60,
+    )
+    return db_key, raw_key
+
+
+@pytest_asyncio.fixture
+async def client(
+    test_db_session: AsyncSession, fake_redis: Redis
+) -> AsyncGenerator[AsyncClient, None]:
+    """Async HTTP client bound to the FastAPI application with test DB & Redis overrides."""
     app = create_app()
 
     async def override_get_db():
         yield test_db_session
 
+    async def override_get_redis():
+        yield fake_redis
+
     app.dependency_overrides[get_db_session] = override_get_db
+    app.dependency_overrides[get_redis] = override_get_redis
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

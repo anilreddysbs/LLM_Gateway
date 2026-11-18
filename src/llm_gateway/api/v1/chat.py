@@ -5,8 +5,10 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, Response, status
 
+from llm_gateway.api.dependencies import verify_client_api_key
 from llm_gateway.config.settings import Settings, get_settings
 from llm_gateway.core.routing import RequestRouter, get_router
+from llm_gateway.db.models import ApiKey
 from llm_gateway.observability.logging import request_id_ctx
 from llm_gateway.providers.base import ProviderError, ProviderRequest
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
@@ -50,6 +52,7 @@ def _set_gateway_headers(
 async def chat_completions(
     request: ChatCompletionRequest,
     response: Response,
+    api_key: ApiKey = Depends(verify_client_api_key),
     router_engine: RequestRouter = Depends(get_router),
     factory: ProviderFactory = Depends(get_provider_factory),
     settings: Settings = Depends(get_settings),
@@ -116,6 +119,8 @@ async def chat_completions(
         provider_name=provider_resp.raw_provider_id,
         cache_status="MISS",
         fallback_used=False,
+        limit=api_key.requests_per_minute,
+        remaining=max(0, api_key.requests_per_minute - 1),
     )
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"

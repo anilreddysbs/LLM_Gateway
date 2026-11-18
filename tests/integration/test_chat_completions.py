@@ -3,6 +3,7 @@
 import pytest
 from httpx import AsyncClient
 
+from llm_gateway.db.models import ApiKey
 from llm_gateway.providers.factory import get_provider_factory
 from llm_gateway.providers.mock import MockProvider
 
@@ -18,15 +19,22 @@ def setup_mock_providers():
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_mock_direct_model(client: AsyncClient):
+async def test_chat_completions_mock_direct_model(
+    client: AsyncClient, valid_api_key: tuple[ApiKey, str]
+):
     """Calling chat completions with direct mock model returns valid OpenAI response and headers."""
+    _, raw_key = valid_api_key
     payload = {
         "model": "mock-primary",
         "messages": [{"role": "user", "content": "Hello, world!"}],
         "temperature": 0.7,
         "max_tokens": 100,
     }
-    response = await client.post("/v1/chat/completions", json=payload)
+    response = await client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
     assert response.status_code == 200
 
     data = response.json()
@@ -46,8 +54,11 @@ async def test_chat_completions_mock_direct_model(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_mock_alias_routing(client: AsyncClient):
+async def test_chat_completions_mock_alias_routing(
+    client: AsyncClient, valid_api_key: tuple[ApiKey, str]
+):
     """Calling chat completions with configured alias 'mock-chain' routes to primary target."""
+    _, raw_key = valid_api_key
     payload = {
         "model": "mock-chain",
         "messages": [
@@ -55,7 +66,11 @@ async def test_chat_completions_mock_alias_routing(client: AsyncClient):
             {"role": "user", "content": "Testing alias routing"},
         ],
     }
-    response = await client.post("/v1/chat/completions", json=payload)
+    response = await client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
     assert response.status_code == 200
 
     data = response.json()
@@ -64,13 +79,20 @@ async def test_chat_completions_mock_alias_routing(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_invalid_model(client: AsyncClient):
+async def test_chat_completions_invalid_model(
+    client: AsyncClient, valid_api_key: tuple[ApiKey, str]
+):
     """Unknown model or alias should return 400 Bad Request with OpenAI error format."""
+    _, raw_key = valid_api_key
     payload = {
         "model": "non-existent-model-xyz",
         "messages": [{"role": "user", "content": "test"}],
     }
-    response = await client.post("/v1/chat/completions", json=payload)
+    response = await client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
     assert response.status_code == 400
 
     data = response.json()
@@ -80,11 +102,18 @@ async def test_chat_completions_invalid_model(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_validation_limits(client: AsyncClient):
+async def test_chat_completions_validation_limits(
+    client: AsyncClient, valid_api_key: tuple[ApiKey, str]
+):
     """Violating request limits (empty messages, exceeding max ceiling) returns 422 or 400."""
+    _, raw_key = valid_api_key
+    headers = {"Authorization": f"Bearer {raw_key}"}
+
     # Empty messages list (violates Pydantic min_length=1)
     res_empty = await client.post(
-        "/v1/chat/completions", json={"model": "mock-primary", "messages": []}
+        "/v1/chat/completions",
+        json={"model": "mock-primary", "messages": []},
+        headers=headers,
     )
     assert res_empty.status_code == 422
 
@@ -96,6 +125,7 @@ async def test_chat_completions_validation_limits(client: AsyncClient):
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 100000,
         },
+        headers=headers,
     )
     assert res_ceiling.status_code == 400
     assert "ceiling" in res_ceiling.json()["error"]["message"]
