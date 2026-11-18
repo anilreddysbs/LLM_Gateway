@@ -1,9 +1,10 @@
-"""OpenAI-compatible Chat Completions API endpoint with caching, rate limiting, and fallback."""
+"""OpenAI-compatible Chat Completions API endpoint with streaming, caching, and fallback."""
 
 import time
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi.responses import StreamingResponse
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,7 @@ from llm_gateway.core.cache import (
 )
 from llm_gateway.core.rate_limit import SlidingWindowRateLimiter, check_monthly_budget
 from llm_gateway.core.resilience.fallback import FallbackExecutor, FallbackResult
+from llm_gateway.core.resilience.streaming import stream_chat_completions
 from llm_gateway.core.routing import RequestRouter, get_router
 from llm_gateway.db.models import ApiKey
 from llm_gateway.db.session import get_db_session
@@ -62,7 +64,6 @@ def _set_gateway_headers(
 
 @router.post(
     "/chat/completions",
-    response_model=ChatCompletionResponse,
     status_code=status.HTTP_200_OK,
 )
 async def chat_completions(
@@ -77,8 +78,8 @@ async def chat_completions(
     factory: ProviderFactory = Depends(get_provider_factory),
     settings: Settings = Depends(get_settings),
     cache_control: str | None = Header(None, alias="Cache-Control"),
-) -> ChatCompletionResponse:
-    """Handle OpenAI-style chat completions requests."""
+):
+    """Handle OpenAI-style chat completions requests (both non-streaming and SSE streaming)."""
     # 1. Monthly budget check
     await check_monthly_budget(api_key, redis_client, session)
 
@@ -127,6 +128,36 @@ async def chat_completions(
             param="model",
         ) from exc
 
+    # 5. Handle Streaming Request (SSE)
+    if request.stream:
+        stream_metadata = {"provider": targets[0].provider, "fallback_used": False}
+        stream_gen = stream_chat_completions(
+            request=request,
+            targets=targets,
+            redis_client=redis_client,
+            factory=factory,
+            settings=settings,
+            stream_metadata=stream_metadata,
+        )
+
+        stream_headers = {
+            "X-Request-ID": request_id_ctx.get(),
+            "X-Gateway-Provider": targets[0].provider,
+            "X-Gateway-Cache": "MISS",
+            "X-Gateway-Fallback": "false",
+            "X-RateLimit-Limit": str(rate_info.limit),
+            "X-RateLimit-Remaining": str(rate_info.remaining),
+            "X-RateLimit-Reset": str(rate_info.reset_seconds),
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+        return StreamingResponse(
+            stream_gen,
+            media_type="text/event-stream",
+            headers=stream_headers,
+        )
+
+    # 6. Non-Streaming path
     executor = FallbackExecutor(
         redis_client=redis_client,
         factory=factory,
@@ -153,7 +184,7 @@ async def chat_completions(
                 error_type="api_error",
             ) from exc
 
-    # 5. Check cache eligibility & execute
+    # Check cache eligibility & execute
     no_cache, no_store = parse_cache_control(cache_control)
     cache_eligible = is_cache_eligible(request, settings)
 
