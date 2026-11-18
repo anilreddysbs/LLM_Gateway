@@ -4,11 +4,15 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Response, status
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_gateway.api.dependencies import verify_client_api_key
+from llm_gateway.api.dependencies import get_rate_limiter, get_redis, verify_client_api_key
 from llm_gateway.config.settings import Settings, get_settings
+from llm_gateway.core.rate_limit import SlidingWindowRateLimiter, check_monthly_budget
 from llm_gateway.core.routing import RequestRouter, get_router
 from llm_gateway.db.models import ApiKey
+from llm_gateway.db.session import get_db_session
 from llm_gateway.observability.logging import request_id_ctx
 from llm_gateway.providers.base import ProviderError, ProviderRequest
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
@@ -53,12 +57,34 @@ async def chat_completions(
     request: ChatCompletionRequest,
     response: Response,
     api_key: ApiKey = Depends(verify_client_api_key),
+    rate_limiter: SlidingWindowRateLimiter = Depends(get_rate_limiter),
+    redis_client: Redis = Depends(get_redis),
+    session: AsyncSession = Depends(get_db_session),
     router_engine: RequestRouter = Depends(get_router),
     factory: ProviderFactory = Depends(get_provider_factory),
     settings: Settings = Depends(get_settings),
     cache_control: str | None = Header(None, alias="Cache-Control"),
 ) -> ChatCompletionResponse:
     """Handle OpenAI-style chat completions requests."""
+    # 1. Budget enforcement
+    await check_monthly_budget(api_key, redis_client, session)
+
+    # 2. Sliding window rate limiting
+    rate_info = await rate_limiter.check_rate_limit(api_key)
+    if not rate_info.allowed:
+        headers = {
+            "Retry-After": str(rate_info.retry_after),
+            "X-RateLimit-Limit": str(rate_info.limit),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(rate_info.reset_seconds),
+        }
+        raise GatewayException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            message=f"Rate limit of {rate_info.limit} RPM exceeded. Retry after {rate_info.retry_after} seconds.",
+            error_type="rate_limit_error",
+            code="rate_limit_exceeded",
+            headers=headers,
+        )
     # 1. Input validation limits
     if len(request.messages) > settings.MAX_REQUEST_MESSAGES:
         raise GatewayException(
@@ -119,8 +145,9 @@ async def chat_completions(
         provider_name=provider_resp.raw_provider_id,
         cache_status="MISS",
         fallback_used=False,
-        limit=api_key.requests_per_minute,
-        remaining=max(0, api_key.requests_per_minute - 1),
+        limit=rate_info.limit,
+        remaining=rate_info.remaining,
+        reset_seconds=rate_info.reset_seconds,
     )
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
