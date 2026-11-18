@@ -2,6 +2,7 @@
 
 import time
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, Response, status
 from fastapi.responses import StreamingResponse
@@ -27,6 +28,7 @@ from llm_gateway.core.resilience.streaming import stream_chat_completions
 from llm_gateway.core.routing import RequestRouter, get_router
 from llm_gateway.db.models import ApiKey
 from llm_gateway.db.session import get_db_session
+from llm_gateway.observability.background import UsageLogEntry, get_usage_queue
 from llm_gateway.observability.logging import request_id_ctx
 from llm_gateway.providers.base import ProviderError, ProviderResponse
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
@@ -128,6 +130,8 @@ async def chat_completions(
             param="model",
         ) from exc
 
+    start_time = time.perf_counter()
+
     # 5. Handle Streaming Request (SSE)
     if request.stream:
         stream_metadata = {"provider": targets[0].provider, "fallback_used": False}
@@ -138,6 +142,9 @@ async def chat_completions(
             factory=factory,
             settings=settings,
             stream_metadata=stream_metadata,
+            api_key_id=api_key.id,
+            router_config=router_engine.config,
+            usage_queue=get_usage_queue(),
         )
 
         stream_headers = {
@@ -164,20 +171,68 @@ async def chat_completions(
         settings=settings,
     )
 
-    fallback_metadata = {"fallback_used": False}
+    fallback_metadata = {
+        "fallback_used": False,
+        "target_used": targets[0],
+        "attempts": 1,
+    }
 
     async def compute_resilient_completion() -> ProviderResponse:
         try:
             fb_res: FallbackResult = await executor.execute(request, targets)
             fallback_metadata["fallback_used"] = fb_res.fallback_used
+            fallback_metadata["target_used"] = fb_res.target_used
+            fallback_metadata["attempts"] = fb_res.attempts
             return fb_res.response
         except ProviderError as err:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            get_usage_queue().enqueue(
+                UsageLogEntry(
+                    request_id=request_id_ctx.get(),
+                    api_key_id=api_key.id,
+                    requested_model=request.model,
+                    provider=targets[0].provider,
+                    model=targets[0].model,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=Decimal("0.0"),
+                    latency_ms=round(duration_ms, 2),
+                    cache_hit=False,
+                    fallback_used=False,
+                    attempts=1,
+                    status_code=err.status_code,
+                    error_type="upstream_error" if err.status_code >= 500 else "invalid_request_error",
+                    alias=request.model if request.model in router_engine.config.aliases else None,
+                    streaming=False,
+                )
+            )
             raise GatewayException(
                 status_code=err.status_code,
                 message=err.message,
                 error_type="upstream_error" if err.status_code >= 500 else "invalid_request_error",
             ) from err
         except Exception as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            get_usage_queue().enqueue(
+                UsageLogEntry(
+                    request_id=request_id_ctx.get(),
+                    api_key_id=api_key.id,
+                    requested_model=request.model,
+                    provider=targets[0].provider,
+                    model=targets[0].model,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=Decimal("0.0"),
+                    latency_ms=round(duration_ms, 2),
+                    cache_hit=False,
+                    fallback_used=False,
+                    attempts=1,
+                    status_code=500,
+                    error_type="api_error",
+                    alias=request.model if request.model in router_engine.config.aliases else None,
+                    streaming=False,
+                )
+            )
             raise GatewayException(
                 status_code=500,
                 message=f"Internal error processing completion: {exc}",
@@ -206,6 +261,39 @@ async def chat_completions(
     else:
         provider_resp = await compute_resilient_completion()
         cache_status = "MISS"
+
+    latency_ms = (time.perf_counter() - start_time) * 1000
+    target_used = fallback_metadata["target_used"]
+
+    if cache_status == "HIT":
+        cost_usd = Decimal("0.0")
+    else:
+        cost_usd = router_engine.config.calculate_cost(
+            target_used.model,
+            provider_resp.input_tokens,
+            provider_resp.output_tokens,
+        )
+
+    get_usage_queue().enqueue(
+        UsageLogEntry(
+            request_id=request_id_ctx.get(),
+            api_key_id=api_key.id,
+            requested_model=request.model,
+            provider=target_used.provider,
+            model=target_used.model,
+            input_tokens=provider_resp.input_tokens,
+            output_tokens=provider_resp.output_tokens,
+            cost_usd=cost_usd,
+            latency_ms=round(latency_ms, 2),
+            cache_hit=(cache_status == "HIT"),
+            fallback_used=fallback_metadata["fallback_used"],
+            attempts=fallback_metadata["attempts"],
+            status_code=200,
+            alias=request.model if request.model in router_engine.config.aliases else None,
+            streaming=False,
+            estimated_tokens=False,
+        )
+    )
 
     _set_gateway_headers(
         response=response,

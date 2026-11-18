@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Force test environment variables before imports
 os.environ["ENVIRONMENT"] = "test"
@@ -22,7 +22,7 @@ from llm_gateway.config.settings import Settings, get_settings
 from llm_gateway.core.auth import generate_api_key
 from llm_gateway.db.models import ApiKey, Base
 from llm_gateway.db.repositories.api_key_repo import ApiKeyRepository
-from llm_gateway.db.session import get_db_session
+from llm_gateway.db.session import get_db_session, get_engine, get_sessionmaker, init_db
 from llm_gateway.main import create_app
 
 
@@ -41,22 +41,15 @@ def models_config() -> ModelsConfig:
 @pytest_asyncio.fixture
 async def test_db_session() -> AsyncGenerator[AsyncSession, None]:
     """In-memory SQLite async test database session."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    sessionmaker = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
+    await init_db()
+    sessionmaker = get_sessionmaker()
 
     async with sessionmaker() as session:
         yield session
 
+    engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
 
 
 @pytest_asyncio.fixture

@@ -86,14 +86,17 @@ async def test_streaming_fallback_before_first_chunk(
         "stream": True,
     }
 
-    response = await client.post("/v1/chat/completions", json=payload, headers=headers)
-    assert response.status_code == 200
-    assert "text/event-stream" in response.headers["content-type"]
+    try:
+        response = await client.post("/v1/chat/completions", json=payload, headers=headers)
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
 
-    assert "Secondary " in response.text
-    assert "stream " in response.text
-    assert "arrived" in response.text
-    assert "data: [DONE]" in response.text
+        assert "Secondary " in response.text
+        assert "stream " in response.text
+        assert "arrived" in response.text
+        assert "data: [DONE]" in response.text
+    finally:
+        factory.register_provider("mock", MockProvider())
 
 
 @pytest.mark.asyncio
@@ -119,11 +122,14 @@ async def test_streaming_error_after_first_chunk_emits_sse_error(
         "stream": True,
     }
 
-    response = await client.post("/v1/chat/completions", json=payload, headers=headers)
-    assert response.status_code == 200
+    try:
+        response = await client.post("/v1/chat/completions", json=payload, headers=headers)
+        assert response.status_code == 200
 
-    text = response.text
-    # Ensure error event is delivered within the SSE stream
-    assert "stream_interrupted" in text
-    assert "Streaming interrupted mid-flight" in text
-    assert "data: [DONE]" in text
+        text = response.text
+        # Ensure error event is delivered within the SSE stream
+        assert "stream_interrupted" in text
+        assert "Streaming interrupted mid-flight" in text
+        assert "data: [DONE]" in text
+    finally:
+        factory.register_provider("mock", MockProvider())

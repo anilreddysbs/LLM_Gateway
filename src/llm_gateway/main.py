@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from llm_gateway.api.router import api_router
 from llm_gateway.config.settings import get_settings
 from llm_gateway.db.session import close_db, init_db
+from llm_gateway.observability.background import get_usage_queue
 from llm_gateway.observability.logging import logger, request_id_ctx, setup_logging
 from llm_gateway.schemas.errors import GatewayException
 
@@ -60,9 +61,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error(f"Failed to initialize database during startup: {exc}")
 
+    # Start background usage log worker
+    usage_queue = get_usage_queue()
+    usage_queue.start()
+
     yield
 
     logger.info("Shutting down LLM Gateway service")
+    await usage_queue.stop()
     await close_db()
 
 

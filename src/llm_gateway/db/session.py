@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 from llm_gateway.config.settings import get_settings
 from llm_gateway.db.models import Base
@@ -30,6 +31,7 @@ def get_engine() -> AsyncEngine:
                 url,
                 echo=settings.DEBUG,
                 connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
             )
         else:
             _engine = create_async_engine(
