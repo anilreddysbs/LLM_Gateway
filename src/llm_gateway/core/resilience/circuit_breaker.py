@@ -6,6 +6,8 @@ from enum import StrEnum
 
 from redis.asyncio import Redis
 
+from llm_gateway.observability.metrics import CIRCUIT_BREAKER_STATE
+
 logger = logging.getLogger("llm_gateway.circuit_breaker")
 
 
@@ -51,20 +53,22 @@ class CircuitBreaker:
 
     async def get_state(self) -> CircuitState:
         """Inspect current circuit breaker state based on Redis keys and cooldown timestamps."""
+        state = CircuitState.CLOSED
         try:
             open_until_raw = await self.redis.get(self.key_open_until)
             if open_until_raw is not None:
                 open_until = float(open_until_raw)
                 now = time.time()
-                if now < open_until:
-                    return CircuitState.OPEN
-                # Cooldown period elapsed -> transition to HALF_OPEN
-                return CircuitState.HALF_OPEN
+                state = CircuitState.OPEN if now < open_until else CircuitState.HALF_OPEN
         except Exception as exc:
             logger.warning(
                 f"Error checking circuit state in Redis for {self.provider}:{self.model}: {exc}"
             )
-        return CircuitState.CLOSED
+
+        # Update Prometheus gauge: 0=CLOSED, 1=HALF_OPEN, 2=OPEN
+        val = 0 if state == CircuitState.CLOSED else (1 if state == CircuitState.HALF_OPEN else 2)
+        CIRCUIT_BREAKER_STATE.labels(provider=self.provider, model=self.model).set(val)
+        return state
 
     async def can_execute(self) -> bool:
         """Evaluate if an execution attempt is permitted to this provider+model target."""

@@ -30,6 +30,14 @@ from llm_gateway.db.models import ApiKey
 from llm_gateway.db.session import get_db_session
 from llm_gateway.observability.background import UsageLogEntry, get_usage_queue
 from llm_gateway.observability.logging import request_id_ctx
+from llm_gateway.observability.metrics import (
+    CACHE_REQUESTS_TOTAL,
+    COST_USD_TOTAL,
+    RATE_LIMIT_EXCEEDED_TOTAL,
+    REQUEST_DURATION_SECONDS,
+    REQUESTS_TOTAL,
+    TOKENS_TOTAL,
+)
 from llm_gateway.providers.base import ProviderError, ProviderResponse
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
 from llm_gateway.schemas.chat import (
@@ -88,6 +96,7 @@ async def chat_completions(
     # 2. Sliding window rate limiting
     rate_info = await rate_limiter.check_rate_limit(api_key)
     if not rate_info.allowed:
+        RATE_LIMIT_EXCEEDED_TOTAL.labels(api_key_id=api_key.id).inc()
         headers = {
             "Retry-After": str(rate_info.retry_after),
             "X-RateLimit-Limit": str(rate_info.limit),
@@ -186,6 +195,12 @@ async def chat_completions(
             return fb_res.response
         except ProviderError as err:
             duration_ms = (time.perf_counter() - start_time) * 1000
+            REQUESTS_TOTAL.labels(
+                provider=targets[0].provider,
+                model=targets[0].model,
+                status_code=str(err.status_code),
+                streaming="false",
+            ).inc()
             get_usage_queue().enqueue(
                 UsageLogEntry(
                     request_id=request_id_ctx.get(),
@@ -257,7 +272,12 @@ async def chat_completions(
             no_store=no_store,
             ttl_seconds=settings.CACHE_TTL_SECONDS,
         )
-        cache_status = "HIT" if is_cache_hit else "MISS"
+        if is_cache_hit:
+            CACHE_REQUESTS_TOTAL.labels(status="hit").inc()
+            cache_status = "HIT"
+        else:
+            CACHE_REQUESTS_TOTAL.labels(status="miss").inc()
+            cache_status = "MISS"
     else:
         provider_resp = await compute_resilient_completion()
         cache_status = "MISS"
@@ -273,6 +293,32 @@ async def chat_completions(
             provider_resp.input_tokens,
             provider_resp.output_tokens,
         )
+
+    # Record Prometheus metrics
+    REQUESTS_TOTAL.labels(
+        provider=target_used.provider,
+        model=target_used.model,
+        status_code="200",
+        streaming="false",
+    ).inc()
+    REQUEST_DURATION_SECONDS.labels(
+        provider=target_used.provider,
+        model=target_used.model,
+    ).observe(latency_ms / 1000.0)
+    TOKENS_TOTAL.labels(
+        provider=target_used.provider,
+        model=target_used.model,
+        type="prompt",
+    ).inc(provider_resp.input_tokens)
+    TOKENS_TOTAL.labels(
+        provider=target_used.provider,
+        model=target_used.model,
+        type="completion",
+    ).inc(provider_resp.output_tokens)
+    COST_USD_TOTAL.labels(
+        provider=target_used.provider,
+        model=target_used.model,
+    ).inc(float(cost_usd))
 
     get_usage_queue().enqueue(
         UsageLogEntry(

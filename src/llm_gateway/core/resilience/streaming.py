@@ -15,6 +15,13 @@ from llm_gateway.core.resilience.circuit_breaker import CircuitBreaker
 from llm_gateway.core.resilience.retry import is_retriable_error
 from llm_gateway.observability.background import UsageLogEntry, UsageLogQueue
 from llm_gateway.observability.logging import request_id_ctx
+from llm_gateway.observability.metrics import (
+    COST_USD_TOTAL,
+    FALLBACKS_TOTAL,
+    REQUEST_DURATION_SECONDS,
+    REQUESTS_TOTAL,
+    TOKENS_TOTAL,
+)
 from llm_gateway.providers.base import ProviderRequest
 from llm_gateway.providers.factory import ProviderFactory, get_provider_factory
 from llm_gateway.schemas.chat import (
@@ -155,20 +162,52 @@ async def stream_chat_completions(
             if active_cb:
                 await active_cb.record_success()
 
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            estimated = False
+            in_tokens = last_input_tokens
+            out_tokens = last_output_tokens
+            if in_tokens == 0 and out_tokens == 0:
+                estimated = True
+                in_tokens = max(1, sum(len(m.content) for m in request.messages) // 4)
+                out_tokens = max(1, total_output_chars // 4)
+
+            cost_usd = Decimal("0.0")
+            if router_config:
+                cost_usd = router_config.calculate_cost(target.model, in_tokens, out_tokens)
+
+            # Record Prometheus metrics
+            if is_fallback:
+                FALLBACKS_TOTAL.labels(
+                    from_provider=targets[target_idx - 1].provider,
+                    to_provider=target.provider,
+                ).inc()
+
+            REQUESTS_TOTAL.labels(
+                provider=target.provider,
+                model=target.model,
+                status_code="200",
+                streaming="true",
+            ).inc()
+            REQUEST_DURATION_SECONDS.labels(
+                provider=target.provider,
+                model=target.model,
+            ).observe(latency_ms / 1000.0)
+            TOKENS_TOTAL.labels(
+                provider=target.provider,
+                model=target.model,
+                type="prompt",
+            ).inc(in_tokens)
+            TOKENS_TOTAL.labels(
+                provider=target.provider,
+                model=target.model,
+                type="completion",
+            ).inc(out_tokens)
+            COST_USD_TOTAL.labels(
+                provider=target.provider,
+                model=target.model,
+            ).inc(float(cost_usd))
+
             if usage_queue:
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                estimated = False
-                in_tokens = last_input_tokens
-                out_tokens = last_output_tokens
-                if in_tokens == 0 and out_tokens == 0:
-                    estimated = True
-                    in_tokens = max(1, sum(len(m.content) for m in request.messages) // 4)
-                    out_tokens = max(1, total_output_chars // 4)
-
-                cost_usd = Decimal("0.0")
-                if router_config:
-                    cost_usd = router_config.calculate_cost(target.model, in_tokens, out_tokens)
-
                 usage_queue.enqueue(
                     UsageLogEntry(
                         request_id=request_id_ctx.get(),

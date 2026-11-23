@@ -11,6 +11,7 @@ from decimal import Decimal
 from llm_gateway.config.settings import Settings, get_settings
 from llm_gateway.db.models import UsageLog
 from llm_gateway.db.session import get_db_context
+from llm_gateway.observability.metrics import DROPPED_LOGS_TOTAL
 
 logger = logging.getLogger("llm_gateway.usage_queue")
 
@@ -82,6 +83,7 @@ class UsageLogQueue:
             return True
         except asyncio.QueueFull:
             self.dropped_logs_count += 1
+            DROPPED_LOGS_TOTAL.inc()
             logger.error(
                 f"UsageLog queue is full ({self.settings.USAGE_LOG_QUEUE_MAX_SIZE}); "
                 f"dropping log for request {entry.request_id}."

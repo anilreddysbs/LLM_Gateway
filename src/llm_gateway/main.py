@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from llm_gateway.api.dependencies import close_redis
 from llm_gateway.api.router import api_router
 from llm_gateway.config.settings import get_settings
 from llm_gateway.db.session import close_db, init_db
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down LLM Gateway service")
     await usage_queue.stop()
     await close_db()
+    await close_redis()
 
 
 def create_app() -> FastAPI:

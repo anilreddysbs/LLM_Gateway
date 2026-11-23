@@ -12,6 +12,7 @@ from llm_gateway.config.settings import Settings, get_settings
 from llm_gateway.core.resilience.backoff import compute_backoff_delay
 from llm_gateway.core.resilience.circuit_breaker import CircuitBreaker
 from llm_gateway.core.resilience.retry import get_retry_after, is_retriable_error
+from llm_gateway.observability.metrics import FALLBACKS_TOTAL, RETRIES_TOTAL
 from llm_gateway.providers.base import (
     ProviderError,
     ProviderRequest,
@@ -112,6 +113,10 @@ class FallbackExecutor:
                     # Success: record in circuit breaker and return
                     await cb.record_success()
                     if is_fallback:
+                        FALLBACKS_TOTAL.labels(
+                            from_provider=targets[target_idx - 1].provider,
+                            to_provider=target.provider,
+                        ).inc()
                         logger.info(
                             f"Request served by fallback target: {target.provider}:{target.model}"
                         )
@@ -138,6 +143,7 @@ class FallbackExecutor:
 
                     # If attempts remain for this target, backoff and retry
                     if attempt < max_retries:
+                        RETRIES_TOTAL.labels(provider=target.provider, model=target.model).inc()
                         retry_after = get_retry_after(exc)
                         delay = compute_backoff_delay(attempt, retry_after=retry_after)
                         logger.info(

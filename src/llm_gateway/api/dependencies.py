@@ -38,6 +38,14 @@ async def get_redis() -> AsyncGenerator[Redis, None]:
     yield _redis_pool
 
 
+async def close_redis() -> None:
+    """Close the global Redis client connection on application shutdown."""
+    global _redis_pool
+    if _redis_pool is not None:
+        await _redis_pool.aclose()
+        _redis_pool = None
+
+
 async def get_api_key_repo(session: AsyncSession = Depends(get_db_session)) -> ApiKeyRepository:
     """Dependency yielding ApiKeyRepository."""
     return ApiKeyRepository(session)
