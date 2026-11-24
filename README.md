@@ -81,7 +81,7 @@ Measured using the production load testing harness (`scripts/load_test.py`) with
 | **Rate Limit Saturation (429)** | 50 | 20% | 40 | **33.9 RPS** | 338.5 ms | 1038.9 ms | 0.0% |
 | **Fallback Failover Under Outage** | 50 | 100% | 0 | **29.0 RPS** | 30.7 ms | 1020.6 ms | 0.0% |
 
-*\*Cache hits served directly from Redis without upstream LLM network round-trips.* Full analysis in [docs/benchmarks.md](file:///c:/Users/USER/Desktop/Gen_AI/Llm_Gateway/docs/benchmarks.md).
+*\*Cache hits served directly from Redis without upstream LLM network round-trips.* Full analysis in [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 
@@ -262,10 +262,10 @@ curl http://localhost:8000/metrics
 ---
 
 ## Documentation Links
-- [Architectural Decision Records (ADRs)](file:///c:/Users/USER/Desktop/Gen_AI/Llm_Gateway/docs/DECISIONS.md)
-- [Codebase Learning Guide & 15 Q&As](file:///c:/Users/USER/Desktop/Gen_AI/Llm_Gateway/docs/LEARNING.md)
-- [Production Engineering Interview Preparation (25 Q&As)](file:///c:/Users/USER/Desktop/Gen_AI/Llm_Gateway/docs/INTERVIEW_PREP.md)
-- [Measured Performance Benchmarks](file:///c:/Users/USER/Desktop/Gen_AI/Llm_Gateway/docs/benchmarks.md)
+- [Architectural Decision Records (ADRs)](docs/DECISIONS.md)
+- [Codebase Learning Guide & 15 Q&As](docs/LEARNING.md)
+- [Production Engineering Interview Preparation (25 Q&As)](docs/INTERVIEW_PREP.md)
+- [Measured Performance Benchmarks](docs/benchmarks.md)
 
 ---
 
