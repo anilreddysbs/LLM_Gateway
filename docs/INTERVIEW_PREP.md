@@ -187,3 +187,4 @@ This guide contains 25 deep production engineering interview questions with dire
 2. Shared state (rate limits, cache, circuit breakers) is offloaded to a Redis Cluster with read replicas.
 3. Database writes (usage logs) are decoupled via in-process queues and batch commits, minimizing database IOPS.
 4. Caching at the edge eliminates up to 40% of upstream network round-trips.
+

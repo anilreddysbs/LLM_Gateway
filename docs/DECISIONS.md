@@ -100,3 +100,4 @@ We established a strict architectural invariant:
 1. **Fallback Allowed Before First Chunk:** If the primary provider fails *before* emitting any tokens, the gateway catches the exception, closes the primary stream, and seamlessly opens a stream to the secondary provider in the alias chain. The client receives a seamless HTTP 200 stream.
 2. **Fallback Forbidden After First Chunk:** Once the client has received HTTP 200 and the initial delta chunk, HTTP headers cannot be altered and the output stream has begun. Trying to switch providers mid-stream would result in corrupted responses (style mismatch, repetitive content).
 3. Therefore, an error after the first chunk MUST emit an in-stream SSE error event (`stream_interrupted`) and cleanly terminate with `[DONE]`.
+

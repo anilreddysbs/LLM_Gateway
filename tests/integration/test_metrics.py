@@ -61,3 +61,4 @@ async def test_metrics_increments_on_chat_completions(
 
     # Requests total incremented
     assert 'llm_gateway_requests_total{model="mock-primary",provider="mock",status_code="200",streaming="false"}' in text
+

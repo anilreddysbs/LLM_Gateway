@@ -129,3 +129,4 @@ To understand how a request flows through the gateway from edge to upstream and 
 **A:**
 - **Retriable:** Network timeouts, HTTP 429 (Rate Limit / Quota), and HTTP 5xx (500, 502, 503, 504).
 - **Fail-Fast (Non-Retriable):** HTTP 400 (Bad Request), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 422 (Unprocessable Content). Retrying a malformed request will never succeed and wastes time and budget.
+
